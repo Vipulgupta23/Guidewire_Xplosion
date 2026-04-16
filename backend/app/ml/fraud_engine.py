@@ -9,12 +9,74 @@ import os
 import joblib
 import numpy as np
 from datetime import datetime, timezone
+from math import radians, sin, cos, sqrt, asin
+
+from app.database import get_supabase
 
 MODELS_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "models"
 )
 
 _iso_forest = None
+
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _haversine_km(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
+    r = 6371.0
+    dlat = radians(lat2 - lat1)
+    dlng = radians(lng2 - lng1)
+    a = (
+        sin(dlat / 2) ** 2
+        + cos(radians(lat1))
+        * cos(radians(lat2))
+        * sin(dlng / 2) ** 2
+    )
+    return 2 * r * asin(sqrt(a))
+
+
+def _worker_grid_center_distance_km(worker: dict) -> float | None:
+    grid_id = worker.get("grid_id")
+    lat = worker.get("zone_lat")
+    lng = worker.get("zone_lng")
+    if not grid_id or lat is None or lng is None:
+        return None
+    try:
+        grid_res = (
+            get_supabase()
+            .table("microgrids")
+            .select("center_lat, center_lng")
+            .eq("id", grid_id)
+            .single()
+            .execute()
+        )
+        grid = grid_res.data
+        if not grid:
+            return None
+        return _haversine_km(
+            _safe_float(lat),
+            _safe_float(lng),
+            _safe_float(grid.get("center_lat")),
+            _safe_float(grid.get("center_lng")),
+        )
+    except Exception:
+        return None
+
+
+def _severity_signal_is_suspicious(disruption: dict) -> bool:
+    severity = _safe_float(disruption.get("severity"))
+    threshold = _safe_float(disruption.get("threshold"))
+    trigger_type = str(disruption.get("trigger_type") or "")
+    if threshold <= 0:
+        return False
+    if trigger_type in {"heavy_rainfall", "extreme_heat", "severe_aqi", "flood_alert"}:
+        return severity < threshold * 0.6
+    return False
 
 
 def _load_iso_forest():
@@ -62,6 +124,12 @@ def run_fraud_layer1(
             {"type": "policy_after_event", "layer": 1, "severity": "hard"}
         )
 
+    # 5. Very weak severity signal for a supposedly real weather claim.
+    if _severity_signal_is_suspicious(disruption):
+        flags.append(
+            {"type": "weak_weather_signal", "layer": 1, "severity": "hard"}
+        )
+
     hard = [f for f in flags if f["severity"] == "hard"]
     return {"pass": len(hard) == 0, "flags": flags}
 
@@ -102,6 +170,24 @@ def run_fraud_layer2(worker: dict, simulation: dict, income_gap: float) -> dict:
     if worker.get("iss_score", 50) < 30:
         flags.append(
             {"type": "very_low_iss", "layer": 2, "severity": "soft"}
+        )
+
+    # 4. Repeated claims recently.
+    if worker.get("past_claims_count", 0) >= 3:
+        flags.append(
+            {"type": "claim_burst_pattern", "layer": 2, "severity": "soft"}
+        )
+
+    # 5. GPS/home-zone mismatch hint.
+    distance_km = _worker_grid_center_distance_km(worker)
+    if distance_km is not None and distance_km > 8:
+        flags.append(
+            {
+                "type": "gps_spoofing_suspected",
+                "layer": 2,
+                "severity": "soft",
+                "distance_km": round(distance_km, 2),
+            }
         )
 
     return {"pass": len(flags) == 0, "flags": flags}

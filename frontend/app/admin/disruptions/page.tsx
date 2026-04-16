@@ -66,6 +66,8 @@ const TRIGGER_OPTIONS = [
   { type: "severe_aqi", label: "Severe AQI", severity: 420, badge: "😷" },
   { type: "flood_alert", label: "Flood Alert", severity: 0.88, badge: "🌊" },
   { type: "platform_outage", label: "Platform Outage", severity: 1, badge: "📵" },
+  { type: "curfew_bandh", label: "Curfew/Bandh", severity: 1, badge: "🚧" },
+  { type: "cyclone_storm", label: "Cyclone/Storm", severity: 0.95, badge: "🌪️" },
 ];
 
 export default function DisruptionsPage() {

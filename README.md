@@ -137,6 +137,12 @@ cd backend
 python scripts/refresh_live_features.py
 ```
 
+9. Run the Phase 3 schema for Telegram notification linking and delivery logs:
+
+```bash
+backend/scripts/phase3_schema.sql
+```
+
 7. Seed plans and multi-city microgrids if you still need the legacy bootstrap:
 
 ```bash
@@ -170,6 +176,15 @@ npm run dev
    - `flood_alert`
    - `platform_outage` (demo-simulated only)
 5. Show one auto-paid claim and one flagged claim that is reviewed from the admin flow.
+6. Optionally link a Telegram chat id for worker/admin notifications and send a test alert.
+
+## Phase 3 Additions
+
+- Telegram bot alerts for worker and admin notifications
+- Predictive disruption analytics for the next 24–48 hours
+- UPI-style simulated payout receipts and payout audit timelines
+- Expanded admin analytics for loss ratio, payout summary, and next-week liability
+- Demo artefacts in `docs/phase3_demo_flow.md` and `docs/final_pitch_outline.md`
 
 ---
 

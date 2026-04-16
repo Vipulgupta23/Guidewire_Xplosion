@@ -41,6 +41,7 @@ interface Claim {
 
 export default function AdminClaimsPage() {
   const [claims, setClaims] = useState<Claim[]>([]);
+  const [actioningClaimId, setActioningClaimId] = useState<string | null>(null);
   const [simulating, setSimulating] = useState(false);
   const [simForm, setSimForm] = useState({
     trigger_type: "heavy_rainfall",
@@ -52,6 +53,7 @@ export default function AdminClaimsPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [originFilter, setOriginFilter] = useState("all");
   const [reviewableOnly, setReviewableOnly] = useState(false);
+  const [pageMessage, setPageMessage] = useState<string | null>(null);
 
   const fetchClaims = useCallback(async () => {
     try {
@@ -89,26 +91,62 @@ export default function AdminClaimsPage() {
   };
 
   const handleApprove = async (claimId: string) => {
-    await api(`/claims/${claimId}/approve`, {
-      method: "PUT",
-      body: { reviewer: "admin_console" },
-    });
-    await fetchClaims();
-    if (selectedClaim?.id === claimId) {
-      const detail = await api<Claim>(`/claims/${claimId}`);
-      setSelectedClaim(detail);
+    setActioningClaimId(claimId);
+    setPageMessage(null);
+    try {
+      await api(`/claims/${claimId}/approve`, {
+        method: "PUT",
+        body: { reviewer: "admin_console" },
+      });
+      await fetchClaims();
+      if (selectedClaim?.id === claimId) {
+        const detail = await api<Claim>(`/claims/${claimId}`);
+        setSelectedClaim(detail);
+      }
+      setPageMessage("Claim approved successfully.");
+    } catch (err) {
+      setPageMessage(err instanceof Error ? err.message : "Failed to approve claim");
+      await fetchClaims();
+      if (selectedClaim?.id === claimId) {
+        try {
+          const detail = await api<Claim>(`/claims/${claimId}`);
+          setSelectedClaim(detail);
+        } catch {
+          setSelectedClaim(null);
+        }
+      }
+    } finally {
+      setActioningClaimId(null);
     }
   };
 
   const handleReject = async (claimId: string) => {
-    await api(`/claims/${claimId}/reject`, {
-      method: "PUT",
-      body: { reviewer: "admin_console" },
-    });
-    await fetchClaims();
-    if (selectedClaim?.id === claimId) {
-      const detail = await api<Claim>(`/claims/${claimId}`);
-      setSelectedClaim(detail);
+    setActioningClaimId(claimId);
+    setPageMessage(null);
+    try {
+      await api(`/claims/${claimId}/reject`, {
+        method: "PUT",
+        body: { reviewer: "admin_console" },
+      });
+      await fetchClaims();
+      if (selectedClaim?.id === claimId) {
+        const detail = await api<Claim>(`/claims/${claimId}`);
+        setSelectedClaim(detail);
+      }
+      setPageMessage("Claim rejected successfully.");
+    } catch (err) {
+      setPageMessage(err instanceof Error ? err.message : "Failed to reject claim");
+      await fetchClaims();
+      if (selectedClaim?.id === claimId) {
+        try {
+          const detail = await api<Claim>(`/claims/${claimId}`);
+          setSelectedClaim(detail);
+        } catch {
+          setSelectedClaim(null);
+        }
+      }
+    } finally {
+      setActioningClaimId(null);
     }
   };
 
@@ -123,6 +161,12 @@ export default function AdminClaimsPage() {
         <h1 className="text-2xl font-bold text-white">Claims Queue</h1>
         <span className="text-sm text-slate-400">Auto-refreshes every 10s</span>
       </div>
+
+      {!!pageMessage && (
+        <div className="glass-card p-3 text-sm text-slate-300">
+          {pageMessage}
+        </div>
+      )}
 
       <div className="glass-card p-4">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
@@ -218,6 +262,7 @@ export default function AdminClaimsPage() {
         onSelectClaim={handleSelectClaim}
         onApprove={handleApprove}
         onReject={handleReject}
+        actioningClaimId={actioningClaimId}
       />
 
       {selectedClaim && (

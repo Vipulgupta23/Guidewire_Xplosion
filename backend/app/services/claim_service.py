@@ -1,12 +1,14 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any
-import uuid
 
 from fastapi import HTTPException
 from postgrest.exceptions import APIError
 
 from app.database import get_supabase
 from app.ml import earning_simulator, fraud_engine
+from app.services.notification_service import notify_admins, notify_worker
+from app.services.policy_service import is_policy_current, policy_covers_datetime
+from app.services.payout_service import build_mock_payout_id, build_upi_receipt
 from app.utils.explanation_generator import generate_explanation
 
 FALLBACK_WINDOW_HOURS = 48
@@ -85,14 +87,11 @@ def _get_policy_for_disruption(worker_id: str, disruption_started_at: str | None
 
     disruption_dt = _parse_dt(disruption_started_at)
     for policy in policies:
-        start_dt = _parse_dt(f"{policy.get('start_date')}T00:00:00+00:00")
-        end_dt = _parse_dt(f"{policy.get('end_date')}T23:59:59+00:00")
-        if not start_dt or not end_dt or not disruption_dt:
-            continue
-        if start_dt <= disruption_dt <= end_dt:
+        if policy_covers_datetime(policy, disruption_dt):
             return policy
-    active = next((policy for policy in policies if policy.get("status") == "active"), None)
-    return active
+    if disruption_dt is None:
+        return next((policy for policy in policies if is_policy_current(policy)), None)
+    return None
 
 
 def _compute_review_approved_payout(claim: dict) -> float:
@@ -149,6 +148,15 @@ def _canonical_claim(claim: dict) -> dict:
     latest_payout_status = payouts[0]["status"] if payouts else None
     claim_origin = claim.get("claim_origin", "auto")
     claim_status = claim.get("status", "processing")
+    latest_receipt = None
+    if payouts:
+        latest = payouts[0]
+        latest_receipt = build_upi_receipt(
+            claim["id"],
+            _safe_float(latest.get("amount")),
+            latest.get("status", "paid"),
+            latest.get("mock_payout_id"),
+        )
 
     return {
         **claim,
@@ -160,8 +168,21 @@ def _canonical_claim(claim: dict) -> dict:
         "paid_amount": paid_amount,
         "held_amount": held_amount,
         "latest_payout_status": latest_payout_status,
+        "upi_receipt": latest_receipt,
+        "payout_timeline": [
+            {
+                "id": payout.get("id"),
+                "amount": _safe_float(payout.get("amount")),
+                "status": payout.get("status"),
+                "provider_ref": payout.get("mock_payout_id"),
+                "paid_at": payout.get("paid_at"),
+                "created_at": payout.get("created_at"),
+            }
+            for payout in payouts
+        ],
         "review_required": claim_status in REVIEWABLE_STATUSES,
         "can_worker_fallback": False,
+        "fraud_report": build_fraud_report({**claim, "payouts": payouts, "claim_events": claim_events}),
         "lifecycle_summary": {
             "status": claim_status,
             "origin": claim_origin,
@@ -236,6 +257,64 @@ def _enrich_claim_row(claim: dict) -> dict:
             "workers": worker,
         }
     )
+
+
+def build_fraud_report(claim: dict) -> dict:
+    flags = claim.get("fraud_flags") or []
+    recommendation = "auto_pay"
+    if not claim.get("fraud_layer1_pass", True):
+        recommendation = "deny_or_review"
+    elif not claim.get("fraud_layer2_pass", True) or not claim.get("fraud_layer3_pass", True):
+        recommendation = "review"
+
+    return {
+        "claim_id": claim.get("id"),
+        "fraud_score": _safe_float(claim.get("fraud_score")),
+        "risk_level": (
+            "high"
+            if _safe_float(claim.get("fraud_score")) >= 0.75
+            else "medium"
+            if _safe_float(claim.get("fraud_score")) >= 0.25
+            else "low"
+        ),
+        "recommendation": recommendation,
+        "review_required": claim.get("status") in REVIEWABLE_STATUSES,
+        "flags": flags,
+        "delivery_specific_flags": [
+            flag for flag in flags
+            if flag.get("type") in {
+                "gps_spoofing_suspected",
+                "weak_weather_signal",
+                "claim_burst_pattern",
+                "zone_mismatch",
+            }
+        ],
+        "layers": [
+            {
+                "layer": 1,
+                "name": "Rule-based validation",
+                "pass": claim.get("fraud_layer1_pass", True),
+                "explanation": "Verifies zone match, duplicate claims, recent activity, and policy timing.",
+            },
+            {
+                "layer": 2,
+                "name": "Behavioral analysis",
+                "pass": claim.get("fraud_layer2_pass", True),
+                "explanation": "Checks worker age, ISS health, and claim size versus expected income behavior.",
+            },
+            {
+                "layer": 3,
+                "name": "ML anomaly detection",
+                "pass": claim.get("fraud_layer3_pass", True),
+                "explanation": "Isolation Forest flags outlier claim patterns for operator review.",
+            },
+        ],
+        "operator_summary": (
+            "Claim is clear for automation."
+            if recommendation == "auto_pay"
+            else "Claim needs operator review before full payout."
+        ),
+    }
 
 
 def get_claims_for_worker(worker_id: str, limit: int = 10) -> list[dict]:
@@ -484,7 +563,7 @@ def create_claim_for_disruption(
             "amount": payout_amount,
             "upi_id": "worker@upi",
             "status": "paid",
-            "mock_payout_id": f"MOCK_PAY_{claim['id'][:8]}",
+            "mock_payout_id": build_mock_payout_id("MOCK_PAY", claim["id"]),
             "paid_at": datetime.now(timezone.utc).isoformat(),
             "whatsapp_shown": False,
         }
@@ -506,7 +585,7 @@ def create_claim_for_disruption(
                 "amount": payout_amount,
                 "upi_id": "worker@upi",
                 "status": "held_for_review",
-                "mock_payout_id": f"MOCK_HOLD_{claim['id'][:8]}",
+                "mock_payout_id": build_mock_payout_id("MOCK_HOLD", claim["id"]),
                 "paid_at": None,
                 "whatsapp_shown": False,
             }
@@ -531,7 +610,35 @@ def create_claim_for_disruption(
             metadata={"status": status, "eligible_payout": eligible_payout},
         )
 
-    return get_claim_detail(claim["id"])
+    claim_detail = get_claim_detail(claim["id"])
+    try:
+        if claim_detail["status"] == "paid":
+            notify_text = (
+                f"{disruption['trigger_type'].replace('_', ' ').title()} detected in your insured grid.\n"
+                f"₹{int(claim_detail['paid_amount'])} has been protected and marked as paid."
+            )
+        else:
+            notify_text = (
+                f"{disruption['trigger_type'].replace('_', ' ').title()} detected in your insured grid.\n"
+                f"Claim status: {claim_detail['status'].replace('_', ' ')} | Eligible payout: ₹{int(eligible_payout)}"
+            )
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                notify_worker(
+                    worker["id"],
+                    "Incometrix protection update",
+                    notify_text,
+                    {"claim_id": claim["id"], "disruption_id": disruption["id"]},
+                )
+            )
+        except RuntimeError:
+            pass
+    except Exception:
+        pass
+
+    return claim_detail
 
 
 def submit_fallback_claim(worker_id: str, disruption_id: str, reason: str | None = None) -> dict:
@@ -655,7 +762,7 @@ def approve_claim_review(
                 "amount": remaining,
                 "status": "paid",
                 "upi_id": "worker@upi",
-                "mock_payout_id": f"REVIEW_PAY_{claim_id[:8]}_{uuid.uuid4().hex[:4]}",
+                "mock_payout_id": build_mock_payout_id("REVIEW_PAY", claim_id),
                 "paid_at": datetime.now(timezone.utc).isoformat(),
             }
         ).execute()
@@ -690,7 +797,29 @@ def approve_claim_review(
             {"iss_score": min(_safe_float(worker_res.data.get("iss_score"), 50) + 3, 100)}
         ).eq("id", claim["worker_id"]).execute()
 
-    return get_claim_detail(claim_id)
+    claim_detail = get_claim_detail(claim_id)
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        loop.create_task(
+            notify_worker(
+                claim["worker_id"],
+                "Claim approved and payout released",
+                f"Your claim was approved after review and ₹{int(approved_total)} has been released.",
+                {"claim_id": claim_id, "status": "approved_after_review"},
+            )
+        )
+        loop.create_task(
+            notify_admins(
+                "Fraud review resolved",
+                f"Claim {claim_id[:8]} was approved and ₹{int(approved_total)} was released.",
+                {"claim_id": claim_id, "reviewer": reviewer},
+            )
+        )
+    except RuntimeError:
+        pass
+
+    return claim_detail
 
 
 def reject_claim_review(
@@ -748,4 +877,26 @@ def reject_claim_review(
             {"iss_score": max(_safe_float(worker_res.data.get("iss_score"), 50) - 10, 0)}
         ).eq("id", claim["worker_id"]).execute()
 
-    return get_claim_detail(claim_id)
+    claim_detail = get_claim_detail(claim_id)
+    try:
+        import asyncio
+        loop = asyncio.get_running_loop()
+        loop.create_task(
+            notify_worker(
+                claim["worker_id"],
+                "Claim rejected after review",
+                "Your payout is cancelled after review. Please check the app for the resolution note.",
+                {"claim_id": claim_id, "status": "rejected"},
+            )
+        )
+        loop.create_task(
+            notify_admins(
+                "Fraud review rejected a claim",
+                f"Claim {claim_id[:8]} was rejected by {reviewer}.",
+                {"claim_id": claim_id, "reviewer": reviewer},
+            )
+        )
+    except RuntimeError:
+        pass
+
+    return claim_detail

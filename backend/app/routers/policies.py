@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 import uuid
 
 from app.database import get_supabase
+from app.services.policy_service import expire_stale_policies, is_policy_current
 from app.services.pricing_quote_service import build_pricing_quote
 
 router = APIRouter(prefix="/policies", tags=["policies"])
@@ -142,6 +143,7 @@ async def subscribe_to_plan(req: SubscribeRequest):
 async def get_active_policy(worker_id: str):
     """Get current active policy for worker."""
     db = get_supabase()
+    expire_stale_policies(worker_id)
     result = (
         db.table("policies")
         .select("*, plans(*)")
@@ -153,7 +155,10 @@ async def get_active_policy(worker_id: str):
     )
     if not result.data:
         return {"policy": None, "message": "No active policy"}
-    return {"policy": result.data[0]}
+    current = next((policy for policy in (result.data or []) if is_policy_current(policy)), None)
+    if not current:
+        return {"policy": None, "message": "No active policy"}
+    return {"policy": current}
 
 
 @router.put("/renew/{policy_id}")

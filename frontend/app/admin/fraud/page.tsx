@@ -31,6 +31,8 @@ const FLAG_DESCRIPTIONS: Record<string, string> = {
 
 export default function FraudPage() {
   const [flaggedClaims, setFlaggedClaims] = useState<FlaggedClaim[]>([]);
+  const [actioningClaimId, setActioningClaimId] = useState<string | null>(null);
+  const [pageMessage, setPageMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const fetchFraud = async () => {
@@ -50,13 +52,31 @@ export default function FraudPage() {
   }, []);
 
   const handleMarkLegit = async (claimId: string) => {
-    await api(`/claims/${claimId}/approve`, { method: "PUT" });
-    fetchFraud();
+    setActioningClaimId(claimId);
+    setPageMessage(null);
+    try {
+      await api(`/claims/${claimId}/approve`, { method: "PUT" });
+      setPageMessage("Claim approved successfully.");
+    } catch (err) {
+      setPageMessage(err instanceof Error ? err.message : "Failed to approve claim");
+    } finally {
+      await fetchFraud();
+      setActioningClaimId(null);
+    }
   };
 
   const handleConfirmFraud = async (claimId: string) => {
-    await api(`/claims/${claimId}/reject`, { method: "PUT" });
-    fetchFraud();
+    setActioningClaimId(claimId);
+    setPageMessage(null);
+    try {
+      await api(`/claims/${claimId}/reject`, { method: "PUT" });
+      setPageMessage("Claim rejected successfully.");
+    } catch (err) {
+      setPageMessage(err instanceof Error ? err.message : "Failed to reject claim");
+    } finally {
+      await fetchFraud();
+      setActioningClaimId(null);
+    }
   };
 
   if (loading) {
@@ -76,11 +96,18 @@ export default function FraudPage() {
         </span>
       </div>
 
+      {!!pageMessage && (
+        <div className="glass-card p-3 text-sm text-slate-300">
+          {pageMessage}
+        </div>
+      )}
+
       <FraudList
         claims={flaggedClaims}
         flagDescriptions={FLAG_DESCRIPTIONS}
         onMarkLegit={handleMarkLegit}
         onConfirmFraud={handleConfirmFraud}
+        actioningClaimId={actioningClaimId}
       />
     </div>
   );

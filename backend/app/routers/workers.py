@@ -8,6 +8,8 @@ from typing import Optional
 
 from app.database import get_supabase
 from app.services.live_grid_service import get_live_grid_detail
+from app.services.notification_service import get_notification_status
+from app.services.prediction_service import get_worker_predictions
 from app.services import weather_service
 from app.services.pricing_feature_service import get_grid_features
 from app.services.pricing_config_service import get_active_pricing_config
@@ -17,7 +19,9 @@ from app.utils.microgrid_utils import (
     infer_city_from_coords,
     is_supported_city,
     get_city_by_name,
+    reconcile_worker_grid,
 )
+from app.ml.iss_calculator import calculate_iss
 from app.ml.persona_classifier import classify_persona
 
 router = APIRouter(prefix="/workers", tags=["workers"])
@@ -154,7 +158,9 @@ async def get_worker(worker_id: str):
     )
     if not result.data:
         raise HTTPException(status_code=404, detail="Worker not found")
-    return result.data
+    worker = result.data
+    reconcile_worker_grid(worker, persist=True)
+    return worker
 
 
 @router.get("/{worker_id}/iss-history")
@@ -187,6 +193,7 @@ async def get_protection_status(worker_id: str):
     if not worker_res.data:
         raise HTTPException(status_code=404, detail="Worker not found")
     worker = worker_res.data
+    reconcile_worker_grid(worker, persist=True)
 
     policy_res = (
         db.table("policies")
@@ -288,6 +295,12 @@ async def get_protection_status(worker_id: str):
     claim_status_label = None
     if latest_claim:
         claim_status_label = latest_claim.get("status", "processing").replace("_", " ")
+    predictions = get_worker_predictions(worker_id)
+    notification_status = get_notification_status("worker", worker_id)
+    earnings_protected = round(
+        payout_summary["paid_amount"] + payout_summary["held_amount"],
+        2,
+    )
 
     return {
         "worker": {
@@ -296,6 +309,7 @@ async def get_protection_status(worker_id: str):
             "city": worker.get("city"),
             "grid_id": worker.get("grid_id"),
             "iss_score": worker.get("iss_score", 50),
+            "persona": worker.get("persona"),
         },
         "coverage": {
             "is_supported_city": is_supported_city(worker.get("city", "")),
@@ -310,6 +324,9 @@ async def get_protection_status(worker_id: str):
         "payout_summary": payout_summary,
         "claim_status_label": claim_status_label,
         "banner": banner,
+        "earnings_protected": earnings_protected,
+        "notification_status": notification_status,
+        "predictions": predictions.get("alerts", []),
     }
 
 
@@ -363,4 +380,44 @@ async def get_pricing_context(worker_id: str):
             "expires_at": feature_row.get("expires_at"),
         },
         "sample_quote": quote["breakdown"],
+    }
+
+
+@router.get("/{worker_id}/predictions")
+async def get_predictions(worker_id: str):
+    """Get predictive disruption alerts for the worker's current grid."""
+    return get_worker_predictions(worker_id)
+
+
+@router.get("/{worker_id}/iss-breakdown")
+async def get_iss_breakdown(worker_id: str):
+    """Get live ISS factor breakdown and persona impact."""
+    db = get_supabase()
+    worker_res = (
+        db.table("workers")
+        .select("*")
+        .eq("id", worker_id)
+        .single()
+        .execute()
+    )
+    if not worker_res.data:
+        raise HTTPException(status_code=404, detail="Worker not found")
+    worker = worker_res.data
+    breakdown = calculate_iss(worker_id)
+    return {
+        "worker_id": worker_id,
+        "iss_score": breakdown["iss_score"],
+        "persona": worker.get("persona"),
+        "factor_breakdown": {
+            "consistency": breakdown["consistency"],
+            "regularity": breakdown["regularity"],
+            "zone_safety": breakdown["zone"],
+            "trust": breakdown["trust"],
+        },
+        "impact_summary": (
+            "Higher ISS unlocks lower weekly premiums and stronger auto-approval confidence."
+            if breakdown["iss_score"] >= 70
+            else "Keep your activity steady to improve premium discounts and payout confidence."
+        ),
+        "notification_status": get_notification_status("worker", worker_id),
     }

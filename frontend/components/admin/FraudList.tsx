@@ -23,9 +23,10 @@ interface FraudListProps {
   flagDescriptions: Record<string, string>;
   onMarkLegit: (claimId: string) => void;
   onConfirmFraud: (claimId: string) => void;
+  actioningClaimId?: string | null;
 }
 
-export default function FraudList({ claims, flagDescriptions, onMarkLegit, onConfirmFraud }: FraudListProps) {
+export default function FraudList({ claims, flagDescriptions, onMarkLegit, onConfirmFraud, actioningClaimId = null }: FraudListProps) {
   if (claims.length === 0) {
     return (
       <div className="glass-card p-12 text-center">
@@ -112,15 +113,17 @@ export default function FraudList({ claims, flagDescriptions, onMarkLegit, onCon
             <div className="flex gap-3">
               <button
                 onClick={() => onMarkLegit(claim.id)}
+                disabled={actioningClaimId === claim.id}
                 className="flex-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 py-2.5 rounded-xl text-sm font-semibold hover:bg-emerald-500/30 transition-colors"
               >
-                Mark as Legitimate
+                {actioningClaimId === claim.id ? "Processing..." : "Mark as Legitimate"}
               </button>
               <button
                 onClick={() => onConfirmFraud(claim.id)}
+                disabled={actioningClaimId === claim.id}
                 className="flex-1 bg-red-500/20 text-red-400 border border-red-500/30 py-2.5 rounded-xl text-sm font-semibold hover:bg-red-500/30 transition-colors"
               >
-                Confirm Fraud
+                {actioningClaimId === claim.id ? "Processing..." : "Confirm Fraud"}
               </button>
             </div>
           </div>

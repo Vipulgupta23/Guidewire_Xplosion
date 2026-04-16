@@ -28,6 +28,18 @@ interface ClaimCardProps {
     review_reason?: string;
     resolution_note?: string;
     latest_payout_status?: string;
+    upi_receipt?: {
+      provider_ref?: string;
+      status_label?: string;
+    };
+    fraud_report?: {
+      operator_summary?: string;
+      risk_level?: string;
+      delivery_specific_flags?: Array<{
+        type: string;
+        distance_km?: number;
+      }>;
+    };
     claim_events?: ClaimEvent[];
     earning_simulation?: {
       hourly_breakdown: Array<{
@@ -151,6 +163,35 @@ export default function ClaimCard({ claim }: ClaimCardProps) {
             </p>
           )}
           {claim.resolution_note && <p className="mt-1 text-slate-400">{claim.resolution_note}</p>}
+          {claim.upi_receipt?.provider_ref && (
+            <p className="mt-1">
+              UPI ref: <span className="text-white">{claim.upi_receipt.provider_ref}</span>
+            </p>
+          )}
+          {claim.upi_receipt?.status_label && (
+            <p className="mt-1 text-slate-400">{claim.upi_receipt.status_label}</p>
+          )}
+        </div>
+      )}
+
+      {claim.fraud_report?.operator_summary && (
+        <div className="mb-3 rounded-lg bg-slate-800/30 p-3 text-xs text-slate-400">
+          {claim.fraud_report?.risk_level && (
+            <p className="mb-1 text-slate-300">
+              Fraud risk: <span className="capitalize text-white">{claim.fraud_report.risk_level}</span>
+            </p>
+          )}
+          {claim.fraud_report.operator_summary}
+          {!!claim.fraud_report?.delivery_specific_flags?.length && (
+            <div className="mt-2 space-y-1">
+              {claim.fraud_report.delivery_specific_flags.map((flag) => (
+                <p key={flag.type} className="text-[11px] text-amber-300">
+                  {flag.type.replace(/_/g, " ")}
+                  {typeof flag.distance_km === "number" ? ` · ${flag.distance_km.toFixed(1)} km mismatch` : ""}
+                </p>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

@@ -138,3 +138,61 @@ def get_grid_by_id(grid_id: str) -> dict | None:
         return None
     except Exception:
         return None
+
+
+def reconcile_worker_grid(worker: dict, persist: bool = True) -> dict | None:
+    """
+    Ensure a worker points at a currently supported microgrid.
+
+    This heals stale worker records after grid bootstrap/schema refreshes by
+    recomputing the grid from saved coordinates and optionally persisting the
+    repaired grid/city back to the worker row.
+    """
+    current_grid_id = worker.get("grid_id")
+    if current_grid_id:
+        current = get_grid_by_id(str(current_grid_id))
+        if current:
+            if (
+                persist
+                and worker.get("id")
+                and current.get("city")
+                and worker.get("city") != current.get("city")
+            ):
+                try:
+                    get_supabase().table("workers").update(
+                        {"city": current["city"]}
+                    ).eq("id", worker["id"]).execute()
+                    worker["city"] = current["city"]
+                except Exception:
+                    pass
+            return current
+
+    lat = worker.get("zone_lat")
+    lng = worker.get("zone_lng")
+    if lat is None or lng is None:
+        return None
+
+    try:
+        resolved = find_grid_by_coordinates(float(lat), float(lng))
+    except Exception:
+        resolved = None
+
+    if not resolved:
+        return None
+
+    worker["grid_id"] = resolved["id"]
+    if resolved.get("city"):
+        worker["city"] = resolved["city"]
+
+    if persist and worker.get("id"):
+        try:
+            get_supabase().table("workers").update(
+                {
+                    "grid_id": resolved["id"],
+                    "city": resolved.get("city", worker.get("city")),
+                }
+            ).eq("id", worker["id"]).execute()
+        except Exception:
+            pass
+
+    return resolved

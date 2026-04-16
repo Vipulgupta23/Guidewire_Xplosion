@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import auth, workers, policies, premium, claims, microgrids, admin
+from app.routers import auth, workers, policies, premium, claims, microgrids, admin, notifications
 
 
 @asynccontextmanager
@@ -67,6 +67,7 @@ app.include_router(premium.router)
 app.include_router(claims.router)
 app.include_router(microgrids.router)
 app.include_router(admin.router)
+app.include_router(notifications.router)
 
 
 @app.get("/")

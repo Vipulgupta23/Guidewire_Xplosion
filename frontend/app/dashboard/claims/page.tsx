@@ -38,6 +38,15 @@ export default function ClaimsPage() {
 
   useEffect(() => {
     fetchClaims();
+    const interval = setInterval(fetchClaims, 10000);
+    const handleFocus = () => {
+      fetchClaims();
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener("focus", handleFocus);
+    };
   }, []);
 
   const handleFallback = async (disruptionId: string) => {

@@ -11,8 +11,10 @@ from app.database import get_supabase
 from app.redis_client import get_redis
 from app.services import weather_service, aqi_service
 from app.services.claim_service import create_claim_for_disruption
+from app.services.notification_service import notify_admins
+from app.services.policy_service import policy_covers_datetime
 from app.services.pricing_feature_service import refresh_grid_features
-from app.utils.microgrid_utils import get_city_by_name
+from app.utils.microgrid_utils import get_city_by_name, reconcile_worker_grid
 
 scheduler = AsyncIOScheduler(timezone="Asia/Kolkata")
 
@@ -53,6 +55,22 @@ TRIGGERS = [
         "payout_max": 300,
         "manual_only": True,
     },
+    {
+        "type": "curfew_bandh",
+        "param": "civic_shutdown_score",
+        "threshold": 0.95,
+        "unit": "score",
+        "payout_max": 450,
+        "manual_only": True,
+    },
+    {
+        "type": "cyclone_storm",
+        "param": "storm_score",
+        "threshold": 0.92,
+        "unit": "score",
+        "payout_max": 700,
+        "manual_only": True,
+    },
 ]
 
 
@@ -85,16 +103,19 @@ async def _poll_all_zones():
     db = get_supabase()
     redis = get_redis()
 
-    # Get unique grids that have active insured workers
+    # Heal stale worker grid assignments before polling.
     workers_res = (
         db.table("workers")
-        .select("grid_id")
+        .select("*")
         .eq("is_active", True)
         .execute()
     )
-    grid_ids = list(
-        set(w["grid_id"] for w in (workers_res.data or []) if w.get("grid_id"))
-    )
+    grid_ids = []
+    for worker in workers_res.data or []:
+        grid = reconcile_worker_grid(worker, persist=True)
+        if grid:
+            grid_ids.append(grid["id"])
+    grid_ids = list(set(grid_ids))
 
     for grid_id in grid_ids:
         grid_res = (
@@ -124,6 +145,11 @@ async def _poll_all_zones():
                 min(1.0, weather.get("rain_6h", 0) / 60),
             ),
             "platform_outage_score": 0.0,
+            "civic_shutdown_score": 0.0,
+            "storm_score": min(
+                1.0,
+                max(float(weather.get("wind_speed", 0)) / 60.0, float(weather.get("rain_6h", 0)) / 90.0),
+            ),
         }
 
         for trigger in TRIGGERS:
@@ -146,13 +172,16 @@ async def _refresh_active_grid_features():
     db = get_supabase()
     workers_res = (
         db.table("workers")
-        .select("grid_id")
+        .select("*")
         .eq("is_active", True)
         .execute()
     )
-    grid_ids = list(
-        set(w["grid_id"] for w in (workers_res.data or []) if w.get("grid_id"))
-    )
+    grid_ids = []
+    for worker in workers_res.data or []:
+        grid = reconcile_worker_grid(worker, persist=True)
+        if grid:
+            grid_ids.append(grid["id"])
+    grid_ids = list(set(grid_ids))
     for grid_id in grid_ids:
         grid_res = (
             db.table("microgrids")
@@ -247,13 +276,18 @@ async def create_disruption_and_claims(
         return None
 
     # 2. Get all insured workers in this grid
-    workers_res = (
+    city_workers_res = (
         db.table("workers")
         .select("*")
-        .eq("grid_id", grid["id"])
+        .eq("city", grid.get("city", ""))
         .eq("is_active", True)
         .execute()
     )
+    workers = []
+    for worker in city_workers_res.data or []:
+        resolved_grid = reconcile_worker_grid(worker, persist=True)
+        if resolved_grid and resolved_grid.get("id") == grid["id"]:
+            workers.append(worker)
 
     affected_worker_count = 0
     claims_created = 0
@@ -263,7 +297,7 @@ async def create_disruption_and_claims(
     paid_payouts = 0
     held_payouts = 0
 
-    for worker in workers_res.data or []:
+    for worker in workers:
         # Check worker has active policy
         policy_res = (
             db.table("policies")
@@ -271,14 +305,21 @@ async def create_disruption_and_claims(
             .eq("worker_id", worker["id"])
             .eq("status", "active")
             .order("created_at", desc=True)
-            .limit(1)
+            .limit(10)
             .execute()
         )
-        if not policy_res.data:
+        policy = next(
+            (
+                row
+                for row in (policy_res.data or [])
+                if policy_covers_datetime(row, datetime.fromisoformat(started_at.replace("Z", "+00:00")))
+            ),
+            None,
+        )
+        if not policy:
             continue
 
         affected_worker_count += 1
-        policy = policy_res.data[0]
         plan = policy.get("plans", {})
         claim = await _process_claim(worker, disruption, trigger, policy, plan)
         if not claim:
@@ -293,6 +334,21 @@ async def create_disruption_and_claims(
                 held_payouts += 1
         elif claim.get("status") in {"manual_submitted", "manual_under_review"}:
             manual_review_claims += 1
+
+    await notify_admins(
+        "Grid disruption triggered",
+        (
+            f"{trigger['type'].replace('_', ' ').title()} in {grid.get('city')} {grid['id']}.\n"
+            f"Affected riders: {affected_worker_count} | Claims: {claims_created} | Paid: {paid_payouts} | Held: {held_payouts}"
+        ),
+        {
+            "grid_id": grid["id"],
+            "city": grid.get("city"),
+            "trigger_type": trigger["type"],
+            "trigger_origin": trigger_origin,
+            "claims_created": claims_created,
+        },
+    )
 
     return {
         "disruption": disruption,

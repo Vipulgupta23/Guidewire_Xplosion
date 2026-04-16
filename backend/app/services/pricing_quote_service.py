@@ -9,14 +9,14 @@ from app.services.pricing_feature_service import (
 )
 from app.utils.microgrid_utils import (
     get_city_by_name,
-    get_grid_by_id,
+    reconcile_worker_grid,
 )
 
 
 async def build_pricing_quote(worker: dict, plan: dict) -> dict:
     db = get_supabase()
     config = get_active_pricing_config()
-    grid = get_grid_by_id(worker.get("grid_id", ""))
+    grid = reconcile_worker_grid(worker, persist=True)
     if not grid:
         raise RuntimeError("Worker does not have a supported microgrid for live pricing.")
 

@@ -14,6 +14,7 @@ interface ClaimsTableProps {
   onSelectClaim: (claim: Claim) => void;
   onApprove: (claimId: string) => void;
   onReject: (claimId: string) => void;
+  actioningClaimId?: string | null;
 }
 
 const TRIGGER_ICONS: Record<string, string> = {
@@ -25,7 +26,7 @@ const TRIGGER_ICONS: Record<string, string> = {
   cyclone: "🌪️",
 };
 
-export default function ClaimsTable({ claims, onSelectClaim, onApprove, onReject }: ClaimsTableProps) {
+export default function ClaimsTable({ claims, onSelectClaim, onApprove, onReject, actioningClaimId = null }: ClaimsTableProps) {
   return (
     <div className="glass-card overflow-hidden">
       <div className="overflow-x-auto">
@@ -86,15 +87,17 @@ export default function ClaimsTable({ claims, onSelectClaim, onApprove, onReject
                     <div className="flex gap-1 justify-center">
                       <button
                         onClick={() => onApprove(claim.id)}
+                        disabled={actioningClaimId === claim.id}
                         className="text-xs bg-emerald-500/20 text-emerald-400 px-2.5 py-1 rounded-lg hover:bg-emerald-500/30"
                       >
-                        ✓
+                        {actioningClaimId === claim.id ? "..." : "✓"}
                       </button>
                       <button
                         onClick={() => onReject(claim.id)}
+                        disabled={actioningClaimId === claim.id}
                         className="text-xs bg-red-500/20 text-red-400 px-2.5 py-1 rounded-lg hover:bg-red-500/30"
                       >
-                        ✕
+                        {actioningClaimId === claim.id ? "..." : "✕"}
                       </button>
                     </div>
                   )}

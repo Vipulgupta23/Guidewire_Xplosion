@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from app.database import get_supabase
 from app.services.claim_service import (
     approve_claim_review,
+    build_fraud_report,
     get_claim_detail as get_claim_detail_service,
     get_claims_for_worker,
     get_worker_fallback_eligibility,
@@ -59,6 +60,13 @@ async def create_fallback_claim(req: FallbackClaimRequest):
 async def get_claim_detail(claim_id: str):
     """Get full claim detail including payouts, events, and fraud summary."""
     return get_claim_detail_service(claim_id)
+
+
+@router.get("/{claim_id}/fraud-report")
+async def get_claim_fraud_report(claim_id: str):
+    """Get canonical fraud report for this claim."""
+    claim = get_claim_detail_service(claim_id)
+    return build_fraud_report(claim)
 
 
 @router.get("/payouts/{worker_id}")

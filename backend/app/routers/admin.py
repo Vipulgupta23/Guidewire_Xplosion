@@ -9,6 +9,9 @@ from datetime import datetime, timezone, timedelta
 
 from app.database import get_supabase
 from app.services.claim_service import get_claim_detail as get_claim_detail_service
+from app.services.notification_service import get_notification_status
+from app.services.policy_service import is_policy_current
+from app.services.prediction_service import get_admin_predictive_analytics
 from app.services.pricing_feature_service import feature_health_summary
 from app.services.trigger_engine import (
     create_disruption_and_claims,
@@ -73,11 +76,20 @@ async def get_admin_stats():
     # Active policies
     policies_res = (
         db.table("policies")
-        .select("id", count="exact")
+        .select("id, weekly_premium_actual, start_date, end_date", count="exact")
         .eq("status", "active")
         .execute()
     )
-    active_policies = policies_res.count or 0
+    current_policies = [policy for policy in (policies_res.data or []) if is_policy_current(policy)]
+    active_policies = len(current_policies)
+    current_week_premium_total = round(
+        sum(float(policy.get("weekly_premium_actual", 0)) for policy in current_policies),
+        2,
+    )
+    projected_next_week_loss_ratio = round(
+        (total_payout_today / max(current_week_premium_total, 1)) * 100,
+        1,
+    )
 
     return {
         "total_workers": total_workers,
@@ -86,6 +98,13 @@ async def get_admin_stats():
         "total_payout_today": round(total_payout_today, 2),
         "fraud_alerts": fraud_alerts,
         "active_policies": active_policies,
+        "current_week_premium_total": current_week_premium_total,
+        "loss_ratio_percent": round(
+            (total_payout_today / max(current_week_premium_total, 1)) * 100,
+            1,
+        ),
+        "projected_next_week_loss_ratio": projected_next_week_loss_ratio,
+        "telegram_status": get_notification_status("admin", "default_admin"),
     }
 
 
@@ -194,6 +213,37 @@ async def get_daily_stats(days: int = 7):
 async def get_feature_health():
     """Live pricing feature freshness by city."""
     return feature_health_summary()
+
+
+@router.get("/payouts-summary")
+async def get_payouts_summary(days: int = 7):
+    """Get payout audit totals and recent payout activity."""
+    db = get_supabase()
+    since = (
+        datetime.now(timezone.utc) - timedelta(days=days)
+    ).isoformat()
+    payouts = (
+        db.table("payouts")
+        .select("*")
+        .gte("created_at", since)
+        .order("created_at", desc=True)
+        .execute()
+    ).data or []
+    return {
+        "window_days": days,
+        "paid_total": round(sum(float(p.get("amount", 0)) for p in payouts if p.get("status") == "paid"), 2),
+        "held_total": round(sum(float(p.get("amount", 0)) for p in payouts if p.get("status") == "held_for_review"), 2),
+        "cancelled_total": round(sum(float(p.get("amount", 0)) for p in payouts if p.get("status") == "cancelled"), 2),
+        "paid_count": sum(1 for p in payouts if p.get("status") == "paid"),
+        "held_count": sum(1 for p in payouts if p.get("status") == "held_for_review"),
+        "recent_payouts": payouts[:12],
+    }
+
+
+@router.get("/predictive-analytics")
+async def get_predictive_analytics():
+    """Get city and grid level disruption and payout forecasts."""
+    return get_admin_predictive_analytics()
 
 
 @router.post("/simulate-trigger")

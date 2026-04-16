@@ -1,12 +1,16 @@
 "use client";
 import { useEffect, useState } from "react";
+import dynamic from "next/dynamic";
 import { api } from "@/lib/api";
 import ISSGauge from "@/components/dashboard/ISSGauge";
 import DisruptionBanner from "@/components/dashboard/DisruptionBanner";
 import ActivePolicyCard from "@/components/dashboard/ActivePolicyCard";
 import ClaimCard from "@/components/dashboard/ClaimCard";
 import WhatsAppModal from "@/components/dashboard/WhatsAppModal";
-import WorkerZoneMap from "@/components/dashboard/WorkerZoneMap";
+
+const WorkerZoneMap = dynamic(() => import("@/components/dashboard/WorkerZoneMap"), {
+  ssr: false,
+});
 
 interface LiveGrid {
   id: string;
@@ -15,6 +19,13 @@ interface LiveGrid {
   map_color: string;
   state_label: string;
   active_disruption_count: number;
+}
+
+interface PredictionAlert {
+  title: string;
+  description: string;
+  confidence: number;
+  predictive_risk_hours: number;
 }
 
 export default function DashboardPage() {
@@ -138,9 +149,20 @@ export default function DashboardPage() {
               Your insured grid updates from live weather, AQI, and disruption automation every 10 seconds.
             </p>
           </div>
-          <span className="rounded-full bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-300">
-            {String((((protectionStatus?.grid_live_status as Record<string, unknown> | undefined)?.state_label) as string) || "Monitoring")}
-          </span>
+          <div className="flex flex-col items-end gap-2">
+            <span className="rounded-full bg-cyan-500/10 px-3 py-1 text-xs font-semibold text-cyan-300">
+              {String((((protectionStatus?.grid_live_status as Record<string, unknown> | undefined)?.state_label) as string) || "Monitoring")}
+            </span>
+            <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+              ((protectionStatus?.notification_status as Record<string, unknown> | undefined)?.linked)
+                ? "bg-emerald-500/10 text-emerald-300"
+                : "bg-slate-700 text-slate-300"
+            }`}>
+              {((protectionStatus?.notification_status as Record<string, unknown> | undefined)?.linked)
+                ? "Telegram alerts linked"
+                : "Telegram not linked"}
+            </span>
+          </div>
         </div>
 
         <WorkerZoneMap
@@ -167,12 +189,74 @@ export default function DashboardPage() {
           />
         </div>
 
+        <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4">
+          <MiniMetric
+            label="Protected this week"
+            value={`₹${Number((protectionStatus?.earnings_protected as number) || 0).toFixed(0)}`}
+          />
+          <MiniMetric
+            label="ISS"
+            value={`${Number((((protectionStatus?.worker as Record<string, unknown> | undefined)?.iss_score as number) || 0).toFixed(0))}`}
+          />
+          <MiniMetric
+            label="Persona"
+            value={String((((protectionStatus?.worker as Record<string, unknown> | undefined)?.persona as string) || "stabilizer")).replace(/^\w/, (c) => c.toUpperCase())}
+          />
+          <MiniMetric
+            label="Payout status"
+            value={String((((protectionStatus?.payout_summary as Record<string, unknown> | undefined)?.latest_status as string) || "watching")).replace(/_/g, " ")}
+          />
+        </div>
+
         <div className="mt-4 rounded-2xl bg-slate-800/50 p-4 text-sm">
           <p className="font-medium text-white">
             {String((((protectionStatus?.grid_live_status as Record<string, unknown> | undefined)?.premium_impact_label) as string) || "Premium remains stable in your current zone.")}
           </p>
           <p className="mt-2 text-slate-400">
             Trigger source: {String((protectionStatus?.disruption_origin as string) || "live monitoring").replace(/_/g, " ")}
+          </p>
+        </div>
+
+        {!!(protectionStatus?.predictions as PredictionAlert[] | undefined)?.length && (
+          <div className="mt-4 rounded-2xl border border-amber-500/20 bg-amber-500/10 p-4">
+            <p className="text-sm font-semibold text-amber-300">24–48h Predictive Alert</p>
+            {((protectionStatus?.predictions as PredictionAlert[])[0]) && (
+              <>
+                <p className="mt-2 text-white font-medium">{(protectionStatus?.predictions as PredictionAlert[])[0].title}</p>
+                <p className="mt-1 text-sm text-slate-300">{(protectionStatus?.predictions as PredictionAlert[])[0].description}</p>
+                <p className="mt-2 text-xs text-slate-400">
+                  Confidence {(protectionStatus?.predictions as PredictionAlert[])[0].confidence} · {(protectionStatus?.predictions as PredictionAlert[])[0].predictive_risk_hours}h predictive window
+                </p>
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-3">
+        <div className="glass-card p-4">
+          <p className="text-sm text-slate-400">Earnings protected</p>
+          <p className="mt-1 text-2xl font-bold text-emerald-300">
+            ₹{Number((protectionStatus?.earnings_protected as number) || 0).toFixed(0)}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">Auto-calculated from paid + held disruption support this week</p>
+        </div>
+        <div className="glass-card p-4">
+          <p className="text-sm text-slate-400">Active weekly coverage</p>
+          <p className="mt-1 text-2xl font-bold text-cyan-300">
+            {policy ? `${new Date(String((policy as Record<string, unknown>).end_date)).toLocaleDateString("en-IN", { month: "short", day: "numeric" })}` : "Inactive"}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            {policy ? "Your current protection window is live." : "Buy a plan to activate zero-touch protection."}
+          </p>
+        </div>
+        <div className="glass-card p-4">
+          <p className="text-sm text-slate-400">Latest payout rail</p>
+          <p className="mt-1 text-2xl font-bold text-amber-300">
+            {String((((latestPayout?.upi_receipt as Record<string, unknown> | undefined)?.provider_ref) as string) || "UPI sandbox")}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            {String((((latestPayout?.upi_receipt as Record<string, unknown> | undefined)?.status_label) as string) || "Awaiting payout activity")}
           </p>
         </div>
       </div>

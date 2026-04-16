@@ -6,6 +6,10 @@ import ISSGauge from "@/components/dashboard/ISSGauge";
 export default function ProfilePage() {
   const [worker, setWorker] = useState<Record<string, unknown> | null>(null);
   const [issHistory, setIssHistory] = useState<Array<Record<string, unknown>>>([]);
+  const [issBreakdown, setIssBreakdown] = useState<Record<string, unknown> | null>(null);
+  const [telegramChatId, setTelegramChatId] = useState("");
+  const [telegramStatus, setTelegramStatus] = useState<Record<string, unknown> | null>(null);
+  const [linkMessage, setLinkMessage] = useState("");
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -19,6 +23,17 @@ export default function ProfilePage() {
         ]);
         setWorker(w);
         setIssHistory(iss);
+        const [breakdown, notifStatus] = await Promise.all([
+          api<Record<string, unknown>>(`/workers/${workerId}/iss-breakdown`),
+          api<Record<string, unknown>>(`/notifications/telegram/status/worker/${workerId}`),
+        ]);
+        setIssBreakdown(breakdown);
+        setTelegramStatus(notifStatus);
+        const savedChatId =
+          (notifStatus?.target_id as string | undefined) ||
+          localStorage.getItem(`telegram_chat_worker_${workerId}`) ||
+          "";
+        setTelegramChatId(savedChatId);
       } catch (err) {
         console.error(err);
       }
@@ -31,6 +46,44 @@ export default function ProfilePage() {
     localStorage.clear();
     sessionStorage.clear();
     window.location.href = "/login";
+  };
+
+  const handleLinkTelegram = async () => {
+    if (!worker || !telegramChatId) return;
+    try {
+      const result = await api<{ status: Record<string, unknown> }>("/notifications/telegram/link", {
+        method: "POST",
+        body: {
+          entity_type: "worker",
+          entity_id: worker.id,
+          chat_id: telegramChatId,
+          username: worker.name,
+        },
+      });
+      setTelegramStatus(result.status);
+      const workerId = String(worker.id);
+      localStorage.setItem(`telegram_chat_worker_${workerId}`, telegramChatId);
+      setLinkMessage("Telegram linked successfully");
+    } catch (err) {
+      setLinkMessage(err instanceof Error ? err.message : "Failed to link Telegram");
+    }
+  };
+
+  const handleTestTelegram = async () => {
+    if (!worker) return;
+    try {
+      await api("/notifications/telegram/test", {
+        method: "POST",
+        body: {
+          entity_type: "worker",
+          entity_id: worker.id,
+          message: "Incometrix AI test alert: your worker notifications are live.",
+        },
+      });
+      setLinkMessage("Telegram test message sent");
+    } catch (err) {
+      setLinkMessage(err instanceof Error ? err.message : "Failed to send test");
+    }
   };
 
   if (loading) {
@@ -96,6 +149,42 @@ export default function ProfilePage() {
         zone={issHistory[0]?.zone_score as number || 60}
         trust={issHistory[0]?.fraud_score_component as number || 100}
       />
+
+      {issBreakdown && (
+        <div className="glass-card p-4">
+          <h3 className="text-sm font-semibold text-white mb-3">ISS Impact Summary</h3>
+          <p className="text-sm text-slate-300">{issBreakdown.impact_summary as string}</p>
+        </div>
+      )}
+
+      <div className="glass-card p-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-sm font-semibold text-white">Telegram Alerts</h3>
+            <p className="text-xs text-slate-400">Link your Telegram chat to receive disruption and payout updates.</p>
+          </div>
+          <span className={`text-xs rounded-full px-2 py-1 ${
+            telegramStatus?.linked ? "bg-emerald-500/20 text-emerald-300" : "bg-slate-700 text-slate-300"
+          }`}>
+            {telegramStatus?.linked ? "Linked" : "Not linked"}
+          </span>
+        </div>
+        <input
+          value={telegramChatId}
+          onChange={(e) => setTelegramChatId(e.target.value)}
+          placeholder="Enter your Telegram chat id"
+          className="w-full rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-white"
+        />
+        <div className="flex gap-2">
+          <button onClick={handleLinkTelegram} className="flex-1 rounded-xl bg-cyan-500/15 py-2 text-sm font-semibold text-cyan-300">
+            Link Telegram
+          </button>
+          <button onClick={handleTestTelegram} className="flex-1 rounded-xl bg-amber-500/15 py-2 text-sm font-semibold text-amber-300">
+            Send Test
+          </button>
+        </div>
+        {!!linkMessage && <p className="text-xs text-slate-400">{linkMessage}</p>}
+      </div>
 
       {/* ISS History */}
       {issHistory.length > 1 && (
