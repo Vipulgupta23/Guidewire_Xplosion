@@ -47,12 +47,13 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        settings.FRONTEND_URL,
+        settings.FRONTEND_URL.rstrip("/") if settings.FRONTEND_URL else "",
         "http://localhost:3000",
         "http://localhost:3001",
         "http://localhost:3010",
         "http://127.0.0.1:3010",
         "https://incometrix.vercel.app",
+        "https://gw-xp.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
