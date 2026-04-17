@@ -1,46 +1,12 @@
 """
-Auth Router — Supabase Email OTP verification + profile fetch.
+Auth Router — Supabase Email + Password authentication.
 """
-
-import time
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from app.config import settings
 from app.database import get_supabase, get_supabase_anon
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-
-# Development-only OTP cache for local testing when Supabase throttles OTP emails.
-_DEV_OTP_TTL_SECONDS = 600
-_DEV_OTP_CODE = "123456"
-_dev_otp_cache: dict[str, tuple[str, float]] = {}
-
-
-def _is_rate_limit_error(message: str) -> bool:
-    normalized = message.lower()
-    return "rate limit" in normalized or "too many requests" in normalized
-
-
-def _store_dev_otp(email: str) -> None:
-    _dev_otp_cache[email] = (_DEV_OTP_CODE, time.time() + _DEV_OTP_TTL_SECONDS)
-
-
-def _is_demo_otp_email(email: str) -> bool:
-    configured = (settings.DEMO_OTP_EMAIL or "").strip().lower()
-    return bool(configured) and email == configured
-
-
-def _validate_dev_otp(email: str, otp: str) -> bool:
-    entry = _dev_otp_cache.get(email)
-    if not entry:
-        return False
-    code, expires_at = entry
-    if time.time() > expires_at:
-        _dev_otp_cache.pop(email, None)
-        return False
-    return otp == code
 
 
 def _get_worker_by_email(email: str):
@@ -59,76 +25,32 @@ def _get_worker_by_email(email: str):
         return None
 
 
-class SendOTPRequest(BaseModel):
+class LoginRequest(BaseModel):
     email: str
+    password: str
 
 
-class VerifyOTPRequest(BaseModel):
+class SignupRequest(BaseModel):
     email: str
-    otp: str
+    password: str
 
 
-@router.post("/send-otp")
-async def send_otp(req: SendOTPRequest):
-    """Send OTP to email."""
+@router.post("/login")
+async def login(req: LoginRequest):
+    """Sign in with email and password."""
     email = req.email.strip().lower()
     auth_client = get_supabase_anon()
 
     try:
-        auth_client.auth.sign_in_with_otp({"email": email})
-        return {
-            "success": True,
-            "message": "OTP sent successfully",
-            "email_hint": email,  # For demo debugging
-        }
-    except Exception as e:
-        error_message = str(e)
-        if (
-            settings.ENVIRONMENT == "development"
-            and _is_demo_otp_email(email)
-            and _is_rate_limit_error(error_message)
-        ):
-            _store_dev_otp(email)
-            return {
-                "success": True,
-                "message": "Supabase OTP rate-limited for the demo inbox. Using development OTP fallback.",
-                "email_hint": email,
-                "dev_otp": _DEV_OTP_CODE,
-            }
-        status = 429 if _is_rate_limit_error(error_message) else 400
-        raise HTTPException(status_code=status, detail=error_message)
-
-
-@router.post("/verify-otp")
-async def verify_otp(req: VerifyOTPRequest):
-    """Verify OTP and return session."""
-    email = req.email.strip().lower()
-    auth_client = get_supabase_anon()
-
-    if (
-        settings.ENVIRONMENT == "development"
-        and _is_demo_otp_email(email)
-        and _validate_dev_otp(email, req.otp)
-    ):
-        worker = _get_worker_by_email(email)
-        return {
-            "success": True,
-            "access_token": f"dev-session-{email}",
-            "user_id": None,
-            "worker": worker,
-            "is_new": worker is None,
-        }
-
-    try:
-        result = auth_client.auth.verify_otp(
-            {"email": email, "token": req.otp, "type": "email"}
+        result = auth_client.auth.sign_in_with_password(
+            {"email": email, "password": req.password}
         )
 
         session = result.session
         user = result.user
 
         if not session:
-            raise HTTPException(status_code=401, detail="Invalid OTP")
+            raise HTTPException(status_code=401, detail="Invalid email or password")
 
         worker = _get_worker_by_email(email)
 
@@ -142,7 +64,60 @@ async def verify_otp(req: VerifyOTPRequest):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e))
+        error_msg = str(e)
+        if "invalid" in error_msg.lower() or "credentials" in error_msg.lower():
+            raise HTTPException(status_code=401, detail="Invalid email or password")
+        raise HTTPException(status_code=400, detail=error_msg)
+
+
+@router.post("/signup")
+async def signup(req: SignupRequest):
+    """Create a new account with email and password."""
+    email = req.email.strip().lower()
+    auth_client = get_supabase_anon()
+
+    try:
+        result = auth_client.auth.sign_up(
+            {"email": email, "password": req.password}
+        )
+
+        user = result.user
+
+        # Supabase may require email confirmation — handle gracefully
+        if not user:
+            raise HTTPException(
+                status_code=400,
+                detail="Signup failed. Please try again.",
+            )
+
+        # Try to immediately sign in so we get a session token
+        try:
+            login_result = auth_client.auth.sign_in_with_password(
+                {"email": email, "password": req.password}
+            )
+            session = login_result.session
+        except Exception:
+            session = None
+
+        worker = _get_worker_by_email(email)
+
+        return {
+            "success": True,
+            "access_token": session.access_token if session else f"pending-{user.id}",
+            "user_id": user.id,
+            "worker": worker,
+            "is_new": worker is None,
+            "confirmation_required": session is None,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        error_msg = str(e)
+        if "already registered" in error_msg.lower() or "already exists" in error_msg.lower():
+            raise HTTPException(
+                status_code=409, detail="An account with this email already exists. Please log in."
+            )
+        raise HTTPException(status_code=400, detail=error_msg)
 
 
 @router.get("/profile/{worker_id}")
